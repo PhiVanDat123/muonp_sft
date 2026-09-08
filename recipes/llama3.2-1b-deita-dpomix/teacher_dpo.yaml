@@ -26,6 +26,8 @@ max_length: 2048
 max_prompt_length: 1800
 num_train_epochs: 1
 optim: adamw_torch
+custom_optimizer: soren
+weight_decay: 0.1
 output_dir: home/minchan.kwon/ADPA/ADPA-OpenSource/data/llama3.2-1b-deita-dpomix/dpo_teacher
 per_device_train_batch_size: 1
 push_to_hub: false

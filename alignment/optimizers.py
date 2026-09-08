@@ -1,0 +1,92 @@
+import torch
+import torch.distributed as dist
+
+from .muon import (
+    MuonWithAuxAdam,
+    MuonWithAuxAdam_sigmoid,
+    SingleDeviceMuonWithAuxAdam,
+    SingleDeviceMuonWithAuxAdam_sigmoid,
+)
+from .htmuon import HTMuonWithAuxAdam
+
+
+MUON_OPTIMIZERS = {
+    "muon",
+    "soren",
+    "htmuon",
+}
+
+
+def _is_distributed() -> bool:
+    return dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+
+
+def _split_muon_params(model: torch.nn.Module):
+    muon_params = []
+    adam_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        lower_name = name.lower()
+        use_muon = (
+            param.ndim >= 2
+            and "embed" not in lower_name
+            and "lm_head" not in lower_name
+            and "norm" not in lower_name
+        )
+        if use_muon:
+            muon_params.append(param)
+        else:
+            adam_params.append(param)
+
+    return muon_params, adam_params
+
+
+def create_custom_optimizer(model: torch.nn.Module, training_args):
+    custom_optimizer = getattr(training_args, "custom_optimizer", None)
+    if custom_optimizer is None:
+        return None
+
+    custom_optimizer = custom_optimizer.lower()
+    if custom_optimizer not in MUON_OPTIMIZERS:
+        raise ValueError(f"Unknown custom optimizer: {custom_optimizer}")
+
+    muon_params, adam_params = _split_muon_params(model)
+    param_groups = []
+
+    if adam_params:
+        param_groups.append(
+            {
+                "params": adam_params,
+                "lr": training_args.learning_rate,
+                "betas": (training_args.adam_beta1, training_args.adam_beta2),
+                "eps": training_args.adam_epsilon,
+                "weight_decay": training_args.weight_decay,
+                "use_muon": False,
+            }
+        )
+    if muon_params:
+        param_groups.append(
+            {
+                "params": muon_params,
+                "lr": training_args.learning_rate,
+                "momentum": getattr(training_args, "muon_momentum", 0.95),
+                "weight_decay": training_args.weight_decay,
+                "use_muon": True,
+            }
+        )
+
+    if not param_groups:
+        raise ValueError("No trainable parameters found for custom optimizer.")
+
+    if custom_optimizer == "soren":
+        optimizer_cls = MuonWithAuxAdam_sigmoid if _is_distributed() else SingleDeviceMuonWithAuxAdam_sigmoid
+        return optimizer_cls(param_groups)
+    if custom_optimizer == "muon":
+        optimizer_cls = MuonWithAuxAdam if _is_distributed() else SingleDeviceMuonWithAuxAdam
+        return optimizer_cls(param_groups)
+
+    htmuon_power = getattr(training_args, "htmuon_power", 0.25)
+    return HTMuonWithAuxAdam(param_groups, power=htmuon_power)

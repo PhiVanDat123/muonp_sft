@@ -2,13 +2,14 @@ import logging
 import random
 import sys
 sys.path.append("~/ADPA")
+from dataclasses import dataclass, field
 from typing import Literal, Optional, Tuple
 
 import datasets
 import torch
 import transformers
 from transformers import AutoModelForCausalLM, set_seed, PreTrainedModel, PreTrainedTokenizer
-from trl import SFTTrainer, SFTConfig
+from trl import SFTTrainer, SFTConfig as TRLSFTConfig
 from trl.models.utils import FORMAT_MAPPING, setup_chat_format
 
 from alignment import (
@@ -24,8 +25,19 @@ from alignment import (
     get_quantization_config,
     get_tokenizer,
 )
+from alignment.optimizers import create_custom_optimizer
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CustomSFTConfig(TRLSFTConfig):
+    custom_optimizer: Optional[str] = field(
+        default=None,
+        metadata={"help": "Set to a supported custom optimizer name: 'muon', 'soren', or 'htmuon'."},
+    )
+    muon_momentum: float = field(default=0.95)
+    htmuon_power: float = field(default=0.25)
 
 
 def setup_chat_format_custom(
@@ -118,7 +130,7 @@ def add_token_model(
 
 
 def main():
-    parser = H4ArgumentParser((ModelArguments, DataArguments, SFTConfig))
+    parser = H4ArgumentParser((ModelArguments, DataArguments, CustomSFTConfig))
     model_args, data_args, training_args = parser.parse()
 
     # Set seed for reproducibility
@@ -237,6 +249,8 @@ def main():
     ########################
     # Initialize the Trainer
     ########################
+    custom_optimizer = create_custom_optimizer(model, training_args)
+
     trainer = SFTTrainer(
         model=model,
         args=training_args,
@@ -249,6 +263,7 @@ def main():
         eval_packing=training_args.packing,
         peft_config=get_peft_config(model_args),
         dataset_kwargs=training_args.dataset_kwargs,
+        optimizers=(custom_optimizer, None) if custom_optimizer is not None else (None, None),
     )
 
     ###############

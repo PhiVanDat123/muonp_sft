@@ -61,6 +61,7 @@ from alignment import (
     is_adapter_model,
 )
 from alignment.data import maybe_insert_system_message, is_openai_format
+from alignment.optimizers import create_custom_optimizer
 from utils.compress_logits import load_input_and_target_probs_fast, load_input_and_target_probs_soft_kl,load_input_and_target_probs_filtered_soft_kl
 from utils.compress_logits import soft_margin_ce_loss
 
@@ -142,6 +143,12 @@ class CustomDPOConfig(TrainingArguments):
         metadata={"help": ("Whether to log and evaluate the first global_step or not.")},
     )
     optim: Optional[str] = field(default="rmsprop")
+    custom_optimizer: Optional[str] = field(
+        default=None,
+        metadata={"help": "Set to a supported custom optimizer name: 'muon', 'soren', or 'htmuon'."},
+    )
+    muon_momentum: float = field(default=0.95)
+    htmuon_power: float = field(default=0.25)
     remove_unused_columns: bool = field(default=False)
 
     # hyper-parameters used in ADPA
@@ -2533,6 +2540,8 @@ def main():
     #########################
     # Instantiate DPO trainer
     #########################
+    custom_optimizer = create_custom_optimizer(model, training_args)
+
     trainer = DistillTrainer(
         model,
         ref_model,
@@ -2541,6 +2550,7 @@ def main():
         train_dataset=raw_datasets["train"],
         eval_dataset=raw_datasets["test"] if "test" in raw_datasets.keys() else None,
         peft_config=get_peft_config(model_args),
+        optimizers=(custom_optimizer, None) if custom_optimizer is not None else (None, None),
     )
 
     ###############

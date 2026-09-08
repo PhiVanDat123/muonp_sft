@@ -33,6 +33,8 @@ lr_scheduler_type: cosine
 max_seq_length: 2048
 max_steps: -1
 num_train_epochs: 3
+custom_optimizer: soren
+weight_decay: 0.1
 output_dir: ~/ADPA-OpenSource/data/llama3.2-1b-deita-dpomix/student_sft_init
 overwrite_output_dir: true
 per_device_eval_batch_size: 1
