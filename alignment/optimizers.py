@@ -1,3 +1,5 @@
+import logging
+
 import torch
 import torch.distributed as dist
 
@@ -9,6 +11,8 @@ from .muon import (
 )
 from .htmuon import HTMuonWithAuxAdam
 
+
+logger = logging.getLogger(__name__)
 
 MUON_OPTIMIZERS = {
     "muon",
@@ -81,6 +85,15 @@ def create_custom_optimizer(model: torch.nn.Module, training_args):
     if not param_groups:
         raise ValueError("No trainable parameters found for custom optimizer.")
 
+    logger.info(
+        "Using custom optimizer %s with %d muon tensors, %d aux-adam tensors, lr=%s, weight_decay=%s",
+        custom_optimizer,
+        len(muon_params),
+        len(adam_params),
+        training_args.learning_rate,
+        training_args.weight_decay,
+    )
+
     if custom_optimizer == "soren":
         optimizer_cls = MuonWithAuxAdam_sigmoid if _is_distributed() else SingleDeviceMuonWithAuxAdam_sigmoid
         return optimizer_cls(param_groups)
@@ -89,4 +102,5 @@ def create_custom_optimizer(model: torch.nn.Module, training_args):
         return optimizer_cls(param_groups)
 
     htmuon_power = getattr(training_args, "htmuon_power", 0.25)
+    logger.info("Using HTMuon power=%s", htmuon_power)
     return HTMuonWithAuxAdam(param_groups, power=htmuon_power)

@@ -40,6 +40,18 @@ class CustomSFTConfig(TRLSFTConfig):
     htmuon_power: float = field(default=0.25)
 
 
+class CustomSFTTrainer(SFTTrainer):
+    def create_optimizer(self):
+        custom_optimizer = create_custom_optimizer(self.model, self.args)
+        if custom_optimizer is not None:
+            self.optimizer = custom_optimizer
+            logger.warning("Trainer optimizer is %s", type(self.optimizer).__name__)
+            return self.optimizer
+        optimizer = super().create_optimizer()
+        logger.warning("Trainer optimizer is %s", type(self.optimizer).__name__)
+        return optimizer
+
+
 def setup_chat_format_custom(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
@@ -249,9 +261,7 @@ def main():
     ########################
     # Initialize the Trainer
     ########################
-    custom_optimizer = create_custom_optimizer(model, training_args)
-
-    trainer = SFTTrainer(
+    trainer = CustomSFTTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -263,7 +273,6 @@ def main():
         eval_packing=training_args.packing,
         peft_config=get_peft_config(model_args),
         dataset_kwargs=training_args.dataset_kwargs,
-        optimizers=(custom_optimizer, None) if custom_optimizer is not None else (None, None),
     )
 
     ###############

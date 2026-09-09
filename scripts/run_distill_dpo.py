@@ -843,6 +843,16 @@ class DistillTrainer(Trainer):
 
         return output
 
+    def create_optimizer(self):
+        custom_optimizer = create_custom_optimizer(self.model, self.args)
+        if custom_optimizer is not None:
+            self.optimizer = custom_optimizer
+            logger.warning("Trainer optimizer is %s", type(self.optimizer).__name__)
+            return self.optimizer
+        optimizer = super().create_optimizer()
+        logger.warning("Trainer optimizer is %s", type(self.optimizer).__name__)
+        return optimizer
+
     def _prepare_deepspeed(self, model: PreTrainedModelWrapper):
         # Adapted from accelerate: https://github.com/huggingface/accelerate/blob/739b135f8367becb67ffaada12fe76e3aa60fefd/src/accelerate/accelerator.py#L1473
         deepspeed_plugin = self.accelerator.state.deepspeed_plugin
@@ -2540,8 +2550,6 @@ def main():
     #########################
     # Instantiate DPO trainer
     #########################
-    custom_optimizer = create_custom_optimizer(model, training_args)
-
     trainer = DistillTrainer(
         model,
         ref_model,
@@ -2550,7 +2558,6 @@ def main():
         train_dataset=raw_datasets["train"],
         eval_dataset=raw_datasets["test"] if "test" in raw_datasets.keys() else None,
         peft_config=get_peft_config(model_args),
-        optimizers=(custom_optimizer, None) if custom_optimizer is not None else (None, None),
     )
 
     ###############
