@@ -2514,7 +2514,7 @@ def main():
         use_cache=False if training_args.gradient_checkpointing else True,
         device_map=get_kbit_device_map() if quantization_config is not None else None,
         quantization_config=quantization_config,
-        use_flash_attention_2=model_args.use_flash_attention_2,
+        attn_implementation="flash_attention_2" if model_args.use_flash_attention_2 else None,
     )
 
     model = model_args.model_name_or_path
