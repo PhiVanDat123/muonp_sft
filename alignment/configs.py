@@ -281,7 +281,7 @@ class DPOConfig(transformers.TrainingArguments):
         default=None,
         metadata={"help": ("Used by TRL for reward model training, which tries to read this parameter in init.")},
     )
-    optim: Optional[str] = field(default="rmsprop")
+    optim: Optional[str] = field(default="adamw_torch")
     remove_unused_columns: bool = field(default=False)
     loss_type: Optional[str] = field(default="sigmoid", metadata={"help": ("The loss type for DPO.")})
 

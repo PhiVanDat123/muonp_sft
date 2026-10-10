@@ -61,7 +61,6 @@ from alignment import (
     is_adapter_model,
 )
 from alignment.data import maybe_insert_system_message, is_openai_format
-from alignment.optimizers import create_custom_optimizer
 from utils.compress_logits import load_input_and_target_probs_fast, load_input_and_target_probs_soft_kl,load_input_and_target_probs_filtered_soft_kl
 from utils.compress_logits import soft_margin_ce_loss
 
@@ -142,18 +141,14 @@ class CustomDPOConfig(TrainingArguments):
         default=True,
         metadata={"help": ("Whether to log and evaluate the first global_step or not.")},
     )
-    optim: Optional[str] = field(default="rmsprop")
-    custom_optimizer: Optional[str] = field(
-        default=None,
-        metadata={"help": "Set to a supported custom optimizer name: 'muon', 'soren', or 'htmuon'."},
-    )
-    muon_momentum: float = field(default=0.95)
-    htmuon_power: float = field(default=0.25)
+    optim: Optional[str] = field(default="adamw_torch")
     remove_unused_columns: bool = field(default=False)
 
     # hyper-parameters used in ADPA
     sft_on_chosen: Optional[float] = field(default=0)
     sft_on_rejected: Optional[float] = field(default=0)
+    spft_weight: Optional[float] = field(default=0)
+    spft_lambda: Optional[float] = field(default=1.0)
     dpo_weight: Optional[float] = field(default=0)
     distillation_weight: Optional[float] = field(default=0)
     chosen_distil_weight: Optional[float] = field(default=0)
@@ -201,6 +196,8 @@ class CustomDPOConfig(TrainingArguments):
     label_smoothing: float = 0.0
     loss_type: Literal[
         "sigmoid",
+        "tdpo1",
+        "tdpo2",
         "hinge",
         "ipo",
         "exo_pair",
@@ -214,6 +211,7 @@ class CustomDPOConfig(TrainingArguments):
         "apo_zero",
         "apo_down",
     ] = "sigmoid"
+    tdpo_alpha: float = 0.5
     use_weighting: bool = False
     label_pad_token_id: int = -100
     padding_value: Optional[int] = None
@@ -464,10 +462,15 @@ class DistillTrainer(Trainer):
             preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
             peft_config: Optional[dict] = None,
     ):
-        if args.dpo_weight == 0:
+        if args.dpo_weight == 0 and args.spft_weight == 0:
             ref_model = None
         else:
-            if "ref_chosen_logps" in train_dataset.column_names and "ref_rejected_logps" in train_dataset.column_names:
+            if (
+                args.spft_weight == 0
+                and args.loss_type not in ("tdpo1", "tdpo2")
+                and "ref_chosen_logps" in train_dataset.column_names
+                and "ref_rejected_logps" in train_dataset.column_names
+            ):
                 ref_model = None
             elif args.reference_free:
                 ref_model = None
@@ -500,7 +503,7 @@ class DistillTrainer(Trainer):
                     )
                 model_init_kwargs["torch_dtype"] = torch_dtype
 
-        if args.ref_model_init_kwargs is None or self.args.dpo_weight == 0:
+        if args.ref_model_init_kwargs is None or (self.args.dpo_weight == 0 and self.args.spft_weight == 0):
             ref_model_init_kwargs = {}
         elif not isinstance(ref_model, str):
             raise ValueError(
@@ -605,10 +608,15 @@ class DistillTrainer(Trainer):
         self.reference_free = args.reference_free
 
         self.ref_model = ref_model
-        if args.dpo_weight == 0:
+        if args.dpo_weight == 0 and args.spft_weight == 0:
             self.ref_model = None
         else:
-            if "ref_chosen_logps" in train_dataset.column_names and "ref_rejected_logps" in train_dataset.column_names:
+            if (
+                args.spft_weight == 0
+                and args.loss_type not in ("tdpo1", "tdpo2")
+                and "ref_chosen_logps" in train_dataset.column_names
+                and "ref_rejected_logps" in train_dataset.column_names
+            ):
                 self.ref_model = None
             elif self.is_peft_model or args.precompute_ref_log_probs or args.reference_free:
                 self.ref_model = None
@@ -844,11 +852,6 @@ class DistillTrainer(Trainer):
         return output
 
     def create_optimizer(self):
-        custom_optimizer = create_custom_optimizer(self.model, self.args)
-        if custom_optimizer is not None:
-            self.optimizer = custom_optimizer
-            logger.warning("Trainer optimizer is %s", type(self.optimizer).__name__)
-            return self.optimizer
         optimizer = super().create_optimizer()
         logger.warning("Trainer optimizer is %s", type(self.optimizer).__name__)
         return optimizer
@@ -1028,6 +1031,14 @@ class DistillTrainer(Trainer):
                 
         #print(ref_model_output['rejected_logps'].size())
         return ref_model_output["policy_chosen_probs"], ref_model_output["policy_rejected_probs"]
+
+    def compute_ref_output(self, batch: dict[str, torch.LongTensor]) -> dict:
+        compte_ref_context_manager = amp.autocast("cuda") if self._peft_has_been_casted_to_bf16 else nullcontext()
+        with torch.no_grad(), compte_ref_context_manager:
+            if self.ref_model is None:
+                with self.null_ref_context():
+                    return self.concatenated_forward(self.model, batch)
+            return self.concatenated_forward(self.ref_model, batch)
 
     @staticmethod
     def concatenated_inputs(
@@ -1339,6 +1350,50 @@ class DistillTrainer(Trainer):
 
         return losses, chosen_rewards, rejected_rewards
 
+    def tdpo_loss(self, model_output: dict, ref_model_output: dict):
+        def masked_sum(values, labels):
+            mask = (labels != -100).to(values.device)
+            return (values * mask).sum(dim=-1)
+
+        policy_chosen_logps = model_output["policy_chosen_logits"].log_softmax(-1)
+        policy_rejected_logps = model_output["policy_rejected_logits"].log_softmax(-1)
+        ref_chosen_probs = ref_model_output["policy_chosen_probs"].to(policy_chosen_logps.device)
+        ref_rejected_probs = ref_model_output["policy_rejected_probs"].to(policy_rejected_logps.device)
+        ref_chosen_logps = ref_chosen_probs.clamp(min=1e-7).log()
+        ref_rejected_logps = ref_rejected_probs.clamp(min=1e-7).log()
+
+        chosen_labels = model_output["chosen_labels"]
+        rejected_labels = model_output["rejected_labels"]
+        safe_chosen_labels = chosen_labels.clone()
+        safe_rejected_labels = rejected_labels.clone()
+        safe_chosen_labels[safe_chosen_labels == -100] = 0
+        safe_rejected_labels[safe_rejected_labels == -100] = 0
+
+        chosen_token_logratios = torch.gather(
+            policy_chosen_logps - ref_chosen_logps,
+            dim=2,
+            index=safe_chosen_labels.unsqueeze(2),
+        ).squeeze(2)
+        rejected_token_logratios = torch.gather(
+            policy_rejected_logps - ref_rejected_logps,
+            dim=2,
+            index=safe_rejected_labels.unsqueeze(2),
+        ).squeeze(2)
+        chosen_rewards = masked_sum(chosen_token_logratios, chosen_labels)
+        rejected_rewards = masked_sum(rejected_token_logratios, rejected_labels)
+
+        chosen_token_kl = (ref_chosen_probs * (ref_chosen_logps - policy_chosen_logps)).sum(-1)
+        rejected_token_kl = (ref_rejected_probs * (ref_rejected_logps - policy_rejected_logps)).sum(-1)
+        chosen_kl = masked_sum(chosen_token_kl, chosen_labels)
+        rejected_kl = masked_sum(rejected_token_kl, rejected_labels)
+
+        if self.loss_type == "tdpo1":
+            values = chosen_rewards - rejected_rewards - (rejected_kl - chosen_kl)
+        else:
+            values = chosen_rewards - rejected_rewards - self.args.tdpo_alpha * (rejected_kl - chosen_kl.detach())
+        losses = -F.logsigmoid(self.beta * values)
+        return losses, self.beta * chosen_rewards.detach(), self.beta * rejected_rewards.detach(), chosen_kl, rejected_kl
+
     def concatenated_forward(self, model: nn.Module, batch: dict[str, Union[list, torch.LongTensor]]):
         """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
 
@@ -1394,6 +1449,7 @@ class DistillTrainer(Trainer):
         probs = F.softmax(logits, dim=-1)
         output["policy_chosen_probs"] = probs[:num_examples]
         output["policy_rejected_probs"] = probs[num_examples:]
+        output["policy_chosen_logits"] = logits[:num_examples]
         output["policy_rejected_logits"] = logits[num_examples:]  # shape: [B_rejected, T, V]
         if self.loss_type == "ipo" or self.args.dpo_length_normalization:
             all_logps = all_logps / loss_mask.sum(-1)
@@ -1414,6 +1470,22 @@ class DistillTrainer(Trainer):
             reduction='none'
         ).sum(-1).mean()
         return fkl
+
+    @staticmethod
+    def get_spft_loss(policy_probs, ref_probs, labels, spft_lambda, eps=1e-7):
+        mask = (labels != -100).to(policy_probs.device)
+        safe_labels = labels.clone()
+        safe_labels[~mask] = 0
+
+        p_t = torch.gather(policy_probs, dim=-1, index=safe_labels.unsqueeze(-1)).squeeze(-1)
+        p0_t = torch.gather(ref_probs, dim=-1, index=safe_labels.unsqueeze(-1)).squeeze(-1)
+        p_t = p_t.clamp(min=eps, max=1 - eps)
+        p0_t = p0_t.clamp(min=eps, max=1 - eps)
+
+        log_odds_ratio = torch.log(p_t / p0_t) - torch.log((1 - p_t) / (1 - p0_t))
+        weights = (p_t * torch.sigmoid(-spft_lambda * log_odds_ratio)).detach()
+        token_loss = -weights * torch.log(p_t)
+        return token_loss[mask].mean()
     # 이 부분이 policy gradient 계산 부분
     @staticmethod
     def get_reverse_ce(input_probs, target_score, labels):
@@ -1448,6 +1520,17 @@ class DistillTrainer(Trainer):
         losses = losses + self.args.sft_on_chosen * model_output["nll_loss"].mean()
         metrics[f"{prefix}loss/chosen-sft"] = model_output["nll_loss"].detach().mean().cpu().item()
 
+        if self.args.spft_weight > 0:
+            ref_chosen_probs, _ = self.compute_ref_probs(batch)
+            spft_loss = self.get_spft_loss(
+                policy_probs=model_output["policy_chosen_probs"],
+                ref_probs=ref_chosen_probs,
+                labels=model_output["chosen_labels"],
+                spft_lambda=self.args.spft_lambda,
+            )
+            losses = losses + self.args.spft_weight * spft_loss
+            metrics[f"{prefix}loss/spft"] = spft_loss.detach().mean().cpu().item()
+
         #PART1.5: NLL loss on REJECTED
         if self.args.sft_on_rejected > 0:
             rejected_logits = model_output["policy_rejected_logits"]
@@ -1471,17 +1554,25 @@ class DistillTrainer(Trainer):
         # PART2: DPO loss
         ref_chosen_logps, ref_rejected_logps = None, None
         if self.args.dpo_weight > 0.0001:
-            if "ref_chosen_logps" in batch.keys() and "ref_rejected_logps" in batch.keys():
+            if self.loss_type in ("tdpo1", "tdpo2"):
+                ref_model_output = self.compute_ref_output(batch)
+                dpo_losses, chosen_rewards, rejected_rewards, chosen_kl, rejected_kl = self.tdpo_loss(
+                    model_output, ref_model_output
+                )
+                metrics[f"{prefix}loss/tdpo"] = dpo_losses.detach().mean().cpu().item()
+                metrics[f"{prefix}tdpo/chosen_seq_fkl"] = chosen_kl.detach().mean().cpu().item()
+                metrics[f"{prefix}tdpo/rejected_seq_fkl"] = rejected_kl.detach().mean().cpu().item()
+            elif "ref_chosen_logps" in batch.keys() and "ref_rejected_logps" in batch.keys():
                 ref_chosen_logps = batch["ref_chosen_logps"]
                 ref_rejected_logps = batch["ref_rejected_logps"]
+                dpo_losses, chosen_rewards, rejected_rewards = self.dpo_loss(
+                    model_output["chosen_logps"], model_output["rejected_logps"], ref_chosen_logps, ref_rejected_logps
+                )
             else:
                 ref_chosen_logps, ref_rejected_logps = self.compute_ref_log_probs(batch)
-                
-            #print('size in dpo', ref_chosen_logps.size())
-            #print('size in model_output',model_output["chosen_logps"])
-            dpo_losses, chosen_rewards, rejected_rewards = self.dpo_loss(
-                model_output["chosen_logps"], model_output["rejected_logps"], ref_chosen_logps, ref_rejected_logps
-            )
+                dpo_losses, chosen_rewards, rejected_rewards = self.dpo_loss(
+                    model_output["chosen_logps"], model_output["rejected_logps"], ref_chosen_logps, ref_rejected_logps
+                )
             if self.use_weighting:
                 dpo_losses = dpo_losses * model_output["policy_weights"]
             losses = losses + self.args.dpo_weight * dpo_losses.mean()

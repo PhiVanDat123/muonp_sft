@@ -1,54 +1,38 @@
-# Preference Distillation via Value-Based Reinforcement Learning
+# SFT, DPO, SPFT, and TDPO Training
 
-Official repository of **Preference Distillation via Value-Based Reinforcement Learning** (NeurIPS 2025 Poster).  
-This repository provides the implementation of **TVKD (Teacher Value-Based Knowledge Distillation)**.
+This repository contains four training recipes:
 
----
+- **SFT**: supervised fine-tuning.
+- **DPO**: direct preference optimization.
+- **SPFT**: stable preference fine-tuning using the Eq. 35 token-weighted SFT loss.
+- **TDPO**: token-level direct preference optimization with sequential forward-KL.
 
-## 📌 Overview
-TVKD training consists of three main stages:
+All recipes use **AdamW** via `optim: adamw_torch`.
 
-1. **Train the Teacher Model**
-2. **Supervised Fine-Tuning (SFT) for Student Initialization**
-3. **Run TVKD**
+Datasets:
 
----
+- **SFT**: `hkust-nlp/deita-10k-v0`
+- **DPO/SPFT/TDPO**: `HuggingFaceH4/ultrafeedback_binarized`
 
-## ⚙️ Environment Setup
-1. Prepare an environment with **PyTorch** installed according to your GPU setup.  
-2. Clone this repository and install the dependencies:
-   ```bash
-   git clone <your-repo-url>
-   cd <your-repo>
-   pip install -r requirements.txt
-   ```
-3. The implementation mainly depends on:
-   - [trl](https://github.com/huggingface/trl)
-   - [peft](https://github.com/huggingface/peft)
-   - [transformers](https://github.com/huggingface/transformers)
-   - [vllm](https://github.com/vllm-project/vllm)
+## Setup
 
-   As long as your Hugging Face versions are aligned, it should run without issues.
+Install the dependencies in your Python environment:
 
-**Recommended versions**:
-- `torch==2.5.1`
-- `trl==0.12.0`
-- `peft==0.13.0`
+```bash
+pip install -r requirments.txt
+```
 
----
+Adjust model paths, dataset names, batch sizes, and output directories in:
 
-## 🚀 Training Procedure
+```text
+recipes/llama3.2-1b-deita-dpomix/sft.yaml
+recipes/llama3.2-1b-deita-dpomix/dpo.yaml
+recipes/llama3.2-1b-deita-dpomix/spft.yaml
+recipes/llama3.2-1b-deita-dpomix/tdpo.yaml
+```
 
-### 1. Train the Teacher Model
-Prepare an initial teacher model (e.g., **LLaMA, Mistral**).  
-Since TVKD assumes a **DPO-trained teacher**, you must first perform **DPO training**.  
-Optionally, you may run **SFT on the teacher** before DPO to obtain a stronger baseline.
+## Run SFT
 
-In our setup, we follow the paper and use **LLaMA-3.1-8B** as the teacher.  
-- **SFT dataset:** `Deita-10k-V0`  
-- **DPO dataset:** `DPO-MIX-7K`
-
-#### (a) SFT Training for REF Teacher
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
 ACCELERATE_LOG_LEVEL=info \
@@ -56,10 +40,11 @@ DS_SKIP_CUDA_CHECK=1 \
 python -m accelerate.commands.launch \
   --config_file recipes/accelerate_config/deepspeed_zero3.yaml \
   scripts/run_sft.py \
-  recipes/llama3.2-1b-deita-dpomix/teacher_sft.yaml
+  recipes/llama3.2-1b-deita-dpomix/sft.yaml
 ```
 
-#### (b) DPO Training on the REF Teacher
+## Run DPO
+
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
 ACCELERATE_LOG_LEVEL=info \
@@ -67,15 +52,10 @@ DS_SKIP_CUDA_CHECK=1 \
 python -m accelerate.commands.launch \
   --config_file recipes/accelerate_config/deepspeed_zero3.yaml \
   scripts/run_distill_dpo.py \
-  recipes/llama3.2-1b-deita-dpomix/teacher_dpo.yaml
+  recipes/llama3.2-1b-deita-dpomix/dpo.yaml
 ```
 
-> **Note:** You can adjust hyperparameters via the corresponding YAML files.
-
----
-
-### 2. SFT for Student Initialization
-The student model is initialized via **SFT** using the same dataset as the teacher.
+## Run SPFT
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
@@ -83,31 +63,18 @@ ACCELERATE_LOG_LEVEL=info \
 DS_SKIP_CUDA_CHECK=1 \
 python -m accelerate.commands.launch \
   --config_file recipes/accelerate_config/deepspeed_zero3.yaml \
-  scripts/run_sft.py \
-  recipes/llama3.2-1b-deita-dpomix/student_sft_init.yaml
+  scripts/run_distill_dpo.py \
+  recipes/llama3.2-1b-deita-dpomix/spft.yaml
 ```
 
----
+## Run TDPO
 
-### 3. Run TVKD
-Finally, run TVKD training with:
 ```bash
-./run/run_tvkd.sh
-```
-
----
-
-## 📄 Citation
-If you use this repository or the TVKD method in your research, please cite our NeurIPS 2025 paper:
-
-```bibtex
-@misc{kwon2025preferencedistillationvaluebased,
-      title={Preference Distillation via Value based Reinforcement Learning}, 
-      author={Minchan Kwon and Junwon Ko and Kangil Kim and Junmo Kim},
-      year={2025},
-      eprint={2509.16965},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2509.16965}, 
-}
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+ACCELERATE_LOG_LEVEL=info \
+DS_SKIP_CUDA_CHECK=1 \
+python -m accelerate.commands.launch \
+  --config_file recipes/accelerate_config/deepspeed_zero3.yaml \
+  scripts/run_distill_dpo.py \
+  recipes/llama3.2-1b-deita-dpomix/tdpo.yaml
 ```
