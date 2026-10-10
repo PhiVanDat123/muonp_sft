@@ -25,16 +25,28 @@ from alignment import (
     get_quantization_config,
     get_tokenizer,
 )
+from alignment.optimizers import create_custom_optimizer
+
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class CustomSFTConfig(TRLSFTConfig):
-    pass
+    custom_optimizer: Optional[str] = field(
+        default=None,
+        metadata={"help": "Set to a supported custom optimizer name: 'muon', 'soren', or 'htmuon'."},
+    )
+    muon_momentum: float = field(default=0.95)
+    htmuon_power: float = field(default=0.25)
 
 
 class CustomSFTTrainer(SFTTrainer):
     def create_optimizer(self):
+        custom_optimizer = create_custom_optimizer(self.model, self.args)
+        if custom_optimizer is not None:
+            self.optimizer = custom_optimizer
+            logger.warning("Trainer optimizer is %s", type(self.optimizer).__name__)
+            return self.optimizer
         optimizer = super().create_optimizer()
         logger.warning("Trainer optimizer is %s", type(self.optimizer).__name__)
         return optimizer
@@ -172,15 +184,7 @@ def main():
         data_args,
         splits=data_args.dataset_splits,
         configs=data_args.dataset_configs,
-        columns_to_keep=[
-            "messages",
-            "conversations",
-            "chosen",
-            "rejected",
-            "prompt",
-            "completion",
-            "label",
-        ],
+        columns_to_keep=["messages", "chosen", "rejected", "prompt", "completion", "label"],
     )
     logger.info(
         f"Training on the following datasets and their proportions: {[split + ' : ' + str(dset.num_rows) for split, dset in raw_datasets.items()]}"

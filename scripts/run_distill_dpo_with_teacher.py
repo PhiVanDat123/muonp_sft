@@ -110,7 +110,7 @@ class CustomDPOConfig(TrainingArguments):
         default=True,
         metadata={"help": ("Whether to log and evaluate the first global_step or not.")},
     )
-    optim: Optional[str] = field(default="adamw_torch")
+    optim: Optional[str] = field(default="rmsprop")
     remove_unused_columns: bool = field(default=False)
 
     # hyper-parameters used in ADPA

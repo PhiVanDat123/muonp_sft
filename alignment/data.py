@@ -39,24 +39,6 @@ def maybe_insert_system_message(messages, tokenizer):
         messages.insert(0, {"role": "system", "content": ""})
 
 
-def convert_sharegpt_to_openai(messages):
-    role_map = {
-        "human": "user",
-        "user": "user",
-        "gpt": "assistant",
-        "assistant": "assistant",
-        "system": "system",
-    }
-    converted = []
-    for message in messages:
-        role = message.get("role", message.get("from"))
-        content = message.get("content", message.get("value"))
-        if role not in role_map or content is None:
-            raise ValueError(f"Could not convert ShareGPT message to OpenAI format: {message}")
-        converted.append({"role": role_map[role], "content": content})
-    return converted
-
-
 def apply_chat_template(
     example,
     tokenizer,
@@ -64,15 +46,7 @@ def apply_chat_template(
     auto_insert_empty_system_msg: bool = False,
 ):
     if task in ["sft", "generation"]:
-        if "messages" in example and is_openai_format(example["messages"]):
-            messages = example["messages"]
-        elif "conversations" in example:
-            messages = convert_sharegpt_to_openai(example["conversations"])
-        else:
-            raise ValueError(
-                f"Could not format example as dialogue for `{task}` task! "
-                f"Require `messages` or `conversations` but found {list(example.keys())}"
-            )
+        messages = example["messages"]
         # We add an empty system message if there is none
         if auto_insert_empty_system_msg:
             maybe_insert_system_message(messages, tokenizer)
