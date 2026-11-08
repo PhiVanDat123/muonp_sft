@@ -10,6 +10,7 @@ from .muon import (
     SingleDeviceMuonWithAuxAdam_sigmoid,
 )
 from .htmuon import HTMuonWithAuxAdam
+from .muon_p import MuonP
 
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,8 @@ MUON_OPTIMIZERS = {
     "muon",
     "soren",
     "htmuon",
+    "muon_p",
+    "muon-p",
 }
 
 
@@ -58,6 +61,10 @@ def create_custom_optimizer(model: torch.nn.Module, training_args):
         raise ValueError(f"Unknown custom optimizer: {custom_optimizer}")
 
     muon_params, adam_params = _split_muon_params(model)
+    if custom_optimizer in {"muon_p", "muon-p"}:
+        # The upstream spectral kernels operate on matrices only.
+        adam_params.extend(p for p in muon_params if p.ndim != 2)
+        muon_params = [p for p in muon_params if p.ndim == 2]
     param_groups = []
 
     if adam_params:
@@ -93,6 +100,26 @@ def create_custom_optimizer(model: torch.nn.Module, training_args):
         training_args.learning_rate,
         training_args.weight_decay,
     )
+
+    if custom_optimizer in {"muon_p", "muon-p"}:
+        factor = getattr(training_args, "muon_lr_factor", 0.3)
+        if factor < 0:
+            raise ValueError("muon_lr_factor must be nonnegative")
+        for group in param_groups:
+            if group["use_muon"]:
+                group["lr"] *= factor
+                # Upstream Muon^p has no matrix weight decay.
+                group["weight_decay"] = 0.0
+        return MuonP(
+            param_groups,
+            lr=training_args.learning_rate,
+            momentum=getattr(training_args, "muon_momentum", 0.95),
+            backend=getattr(training_args, "muon_backend", "halfpower"),
+            backend_steps=getattr(training_args, "muon_backend_steps", 6),
+            exponent=getattr(training_args, "muon_exponent", "1/3"),
+            ns_c=getattr(training_args, "halfpower_c", None),
+            ns_d=getattr(training_args, "halfpower_d", None),
+        )
 
     if custom_optimizer == "soren":
         optimizer_cls = MuonWithAuxAdam_sigmoid if _is_distributed() else SingleDeviceMuonWithAuxAdam_sigmoid

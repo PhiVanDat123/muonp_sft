@@ -111,3 +111,44 @@ If you use this repository or the TVKD method in your research, please cite our 
       url={https://arxiv.org/abs/2509.16965}, 
 }
 ```
+
+
+## Muon^p optimizer (SFT and DPO)
+
+The optimizer from `muon-p` is available in both `scripts/run_sft.py` and
+`scripts/run_distill_dpo.py`. Add these settings to your training YAML:
+
+```yaml
+custom_optimizer: muon_p
+muon_backend: halfpower
+muon_exponent: "1/3"
+muon_lr_factor: 0.3
+muon_momentum: 0.95
+muon_backend_steps: 6
+halfpower_c: 0.66
+```
+
+For example, from the repository root:
+
+```bash
+python scripts/run_sft.py recipes/llama3.2-1b-deita-dpomix/student_sft_init.yaml --custom_optimizer=muon_p
+python scripts/run_distill_dpo.py recipes/llama3.2-1b-deita-dpomix/teacher_dpo.yaml --custom_optimizer=muon_p
+```
+
+Backends: `halfpower` (polynomial approximation), `halfpower_svd` (exact
+fractional SVD), `newtonschulz5`, and `zeropower_svd`. Polynomial exponents:
+`1/2`, `1/3`, `1/5`, `1/7`, `3/5`, `1/15`, `13/15`. The SVD backend also accepts
+other numeric or rational exponents between 0 and 1. `halfpower_d` configures
+the second coefficient for exponent `1/2`; supply both `halfpower_c` and
+`halfpower_d` to override that polynomial's defaults.
+
+Matrix learning rate is `learning_rate * muon_lr_factor`. As in the source
+optimizer, matrix updates have no weight decay. Embeddings, LM head, norm,
+and non-matrix parameters use AdamW with the training config's learning rate,
+betas, epsilon, and weight decay. Fractional updates retain the source's unit
+RMS normalization. Existing optimizer defaults are unchanged.
+
+The integration uses one PyTorch optimizer for scheduling and checkpoint
+save/load. With DDP, each replica computes its own update after gradient
+synchronization. DeepSpeed ZeRO/FSDP sharded optimizer behavior has not been
+validated. The source curriculum callback is not enabled by this integration.

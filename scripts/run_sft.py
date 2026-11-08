@@ -34,14 +34,22 @@ logger = logging.getLogger(__name__)
 class CustomSFTConfig(TRLSFTConfig):
     custom_optimizer: Optional[str] = field(
         default=None,
-        metadata={"help": "Set to a supported custom optimizer name: 'muon', 'soren', or 'htmuon'."},
+        metadata={"help": "Set to a supported custom optimizer name: 'muon', 'soren', 'htmuon', or 'muon_p'."},
     )
     muon_momentum: float = field(default=0.95)
     htmuon_power: float = field(default=0.25)
+    muon_backend: str = field(default="halfpower")
+    muon_exponent: str = field(default="1/3")
+    muon_lr_factor: float = field(default=0.3)
+    muon_backend_steps: int = field(default=6)
+    halfpower_c: Optional[float] = field(default=None)
+    halfpower_d: Optional[float] = field(default=None)
 
 
 class CustomSFTTrainer(SFTTrainer):
     def create_optimizer(self):
+        if self.optimizer is not None:
+            return self.optimizer
         custom_optimizer = create_custom_optimizer(self.model, self.args)
         if custom_optimizer is not None:
             self.optimizer = custom_optimizer
